@@ -1,0 +1,1136 @@
+# Windows Server 2022 Hyper-V Gen2 無人インストール完全ガイド
+
+## 目次
+1. [Hyper-V Gen2環境の準備](#hyper-v-gen2環境の準備)
+2. [Windows System Image Manager (SIM) の設定](#windows-system-image-manager-sim-の設定)
+3. [Answer File (unattend.xml) の作成](#answer-file-unattendxml-の作成)
+4. [Server 2022 特有の設定](#server-2022-特有の設定)
+5. [役割と機能の自動インストール](#役割と機能の自動インストール)
+6. [セキュリティ設定の自動化](#セキュリティ設定の自動化)
+7. [PowerShell スクリプトの統合](#powershell-スクリプトの統合)
+8. [トラブルシューティング](#トラブルシューティング)
+
+## Hyper-V Gen2環境の準備
+
+### 1. 仮想マシンの作成
+
+```powershell
+# Hyper-V Gen2 仮想マシンの作成
+$VMName = "WS2022-Template"
+$VMPath = "C:\VMs"
+$VHDPath = "$VMPath\$VMName\$VMName.vhdx"
+$Memory = 4GB
+$VHDSize = 127GB
+
+# 仮想マシンの作成
+New-VM -Name $VMName -Path $VMPath -Generation 2 -MemoryStartupBytes $Memory -NewVHDPath $VHDPath -NewVHDSizeBytes $VHDSize
+
+# プロセッサ設定
+Set-VMProcessor -VMName $VMName -Count 2
+
+# セキュアブート設定（Server 2022対応）
+Set-VMFirmware -VMName $VMName -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
+
+# Dynamic Memory設定
+Set-VMMemory -VMName $VMName -DynamicMemoryEnabled $true -MinimumBytes 2GB -MaximumBytes 8GB
+
+# ネットワーク設定
+Add-VMNetworkAdapter -VMName $VMName -SwitchName "Internal"
+
+# DVDドライブの追加とISO設定
+Set-VMDvdDrive -VMName $VMName -Path "C:\ISO\WindowsServer2022.iso"
+
+# TPM有効化（必要に応じて）
+Set-VMSecurity -VMName $VMName -TpmEnabled $true
+```
+
+### 2. Gen2特有の設定
+
+**UEFIブート順序の設定**
+```powershell
+# ブート順序の確認と設定
+$BootOrder = Get-VMFirmware -VMName $VMName
+Set-VMFirmware -VMName $VMName -FirstBootDevice $BootOrder.BootOrder[1] # DVDを最初に
+```
+
+**セキュアブートテンプレート**
+- MicrosoftWindows: 標準的なWindows環境
+- MicrosoftUEFICertificateAuthority: より厳密なセキュリティ
+
+## Windows System Image Manager (SIM) の設定
+
+### 1. ADK for Windows 11 のインストール
+
+```cmd
+# Windows ADK のダウンロードとインストール
+# https://docs.microsoft.com/en-us/windows-hardware/get-started/adk-install
+
+# 必要なコンポーネント:
+# - Deployment Tools
+# - Windows Preinstallation Environment (Windows PE)
+# - User State Migration Tool (USMT)
+```
+
+### 2. カタログファイルの作成
+
+```cmd
+# Windows Server 2022 ISOからinstall.wimを抽出
+dism /get-wiminfo /wimfile:D:\sources\install.wim
+
+# カタログファイルの生成
+# SIMでinstall.wimを開き、カタログファイルを生成
+```
+
+## Answer File (unattend.xml) の作成
+
+### 基本的なunattend.xml（Server 2022 Standard）
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <!-- Windows PE Pass -->
+    <settings pass="windowsPE">
+        <!-- 国際化設定 -->
+        <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <SetupUILanguage>
+                <UILanguage>ja-JP</UILanguage>
+            </SetupUILanguage>
+            <InputLocale>0411:00000411</InputLocale>
+            <SystemLocale>ja-JP</SystemLocale>
+            <UILanguage>ja-JP</UILanguage>
+            <UserLocale>ja-JP</UserLocale>
+        </component>
+
+        <!-- セットアップ設定 -->
+        <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <!-- ディスク設定（Gen2 UEFI用） -->
+            <DiskConfiguration>
+                <Disk wcm:action="add">
+                    <DiskID>0</DiskID>
+                    <WillWipeDisk>true</WillWipeDisk>
+                    <CreatePartitions>
+                        <!-- EFI System Partition -->
+                        <CreatePartition wcm:action="add">
+                            <Order>1</Order>
+                            <Type>EFI</Type>
+                            <Size>260</Size>
+                        </CreatePartition>
+                        <!-- Microsoft Reserved Partition -->
+                        <CreatePartition wcm:action="add">
+                            <Order>2</Order>
+                            <Type>MSR</Type>
+                            <Size>128</Size>
+                        </CreatePartition>
+                        <!-- Windows Partition -->
+                        <CreatePartition wcm:action="add">
+                            <Order>3</Order>
+                            <Type>Primary</Type>
+                            <Extend>true</Extend>
+                        </CreatePartition>
+                    </CreatePartitions>
+                    <ModifyPartitions>
+                        <ModifyPartition wcm:action="add">
+                            <Order>1</Order>
+                            <PartitionID>1</PartitionID>
+                            <Label>System</Label>
+                            <Format>FAT32</Format>
+                        </ModifyPartition>
+                        <ModifyPartition wcm:action="add">
+                            <Order>2</Order>
+                            <PartitionID>2</PartitionID>
+                        </ModifyPartition>
+                        <ModifyPartition wcm:action="add">
+                            <Order>3</Order>
+                            <PartitionID>3</PartitionID>
+                            <Letter>C</Letter>
+                            <Label>Windows</Label>
+                            <Format>NTFS</Format>
+                        </ModifyPartition>
+                    </ModifyPartitions>
+                </Disk>
+            </DiskConfiguration>
+
+            <!-- イメージ選択 -->
+            <ImageInstall>
+                <OSImage>
+                    <InstallFrom>
+                        <MetaData wcm:action="add">
+                            <Key>/IMAGE/NAME</Key>
+                            <Value>Windows Server 2022 Standard</Value>
+                        </MetaData>
+                    </InstallFrom>
+                    <InstallTo>
+                        <DiskID>0</DiskID>
+                        <PartitionID>3</PartitionID>
+                    </InstallTo>
+                </OSImage>
+            </ImageInstall>
+
+            <!-- ライセンス設定 -->
+            <UserData>
+                <ProductKey>
+                    <Key>VDYBN-27WPP-V4HQT-9VMD4-VMK7H</Key> <!-- Server 2022 Standard評価版 -->
+                    <WillShowUI>OnError</WillShowUI>
+                </ProductKey>
+                <AcceptEula>true</AcceptEula>
+            </UserData>
+
+            <!-- Windows PE起動コマンド -->
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Path>reg add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <Path>reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
+    </settings>
+
+    <!-- Specialize Pass -->
+    <settings pass="specialize">
+        <!-- コンピューター設定 -->
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <ComputerName>WS2022-SRV01</ComputerName>
+            <RegisteredOrganization>Your Organization</RegisteredOrganization>
+            <RegisteredOwner>IT Department</RegisteredOwner>
+            <TimeZone>Tokyo Standard Time</TimeZone>
+        </component>
+
+        <!-- ネットワーク設定 -->
+        <component name="Microsoft-Windows-TCPIP" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <Interfaces>
+                <Interface wcm:action="add">
+                    <Identifier>Ethernet</Identifier>
+                    <UnicastIpAddresses>
+                        <IpAddress wcm:action="add" wcm:keyValue="1">192.168.1.10/24</IpAddress>
+                    </UnicastIpAddresses>
+                    <Routes>
+                        <Route wcm:action="add">
+                            <Identifier>0</Identifier>
+                            <Prefix>0.0.0.0/0</Prefix>
+                            <NextHopAddress>192.168.1.1</NextHopAddress>
+                        </Route>
+                    </Routes>
+                </Interface>
+            </Interfaces>
+        </component>
+
+        <!-- DNS設定 -->
+        <component name="Microsoft-Windows-DNS-Client" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <Interfaces>
+                <Interface wcm:action="add">
+                    <Identifier>Ethernet</Identifier>
+                    <DNSServerSearchOrder>
+                        <IpAddress wcm:action="add" wcm:keyValue="1">8.8.8.8</IpAddress>
+                        <IpAddress wcm:action="add" wcm:keyValue="2">8.8.4.4</IpAddress>
+                    </DNSServerSearchOrder>
+                </Interface>
+            </Interfaces>
+        </component>
+
+        <!-- Windows Update設定 -->
+        <component name="Microsoft-Windows-WindowsUpdateServices" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <WUServer>https://windowsupdate.microsoft.com</WUServer>
+            <WUStatusServer>https://windowsupdate.microsoft.com</WUStatusServer>
+        </component>
+
+        <!-- リモートデスクトップ有効化 -->
+        <component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <fDenyTSConnections>false</fDenyTSConnections>
+        </component>
+
+        <!-- ファイアウォール設定 -->
+        <component name="Networking-MPSSVC-Svc" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <FirewallGroups>
+                <FirewallGroup wcm:action="add" wcm:keyValue="RemoteDesktop">
+                    <Active>true</Active>
+                    <Group>Remote Desktop</Group>
+                    <Profile>all</Profile>
+                </FirewallGroup>
+            </FirewallGroups>
+        </component>
+    </settings>
+
+    <!-- OOBE System Pass -->
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <!-- OOBE設定 -->
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <NetworkLocation>Work</NetworkLocation>
+                <ProtectYourPC>1</ProtectYourPC>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+            </OOBE>
+
+            <!-- ユーザーアカウント設定 -->
+            <UserAccounts>
+                <AdministratorPassword>
+                    <Value>UABhAHMAcwB3AG8AcgBkADEAMgAzACEAQQBkAG0AaQBuAGkAcwB0AHIAYQB0AG8AcgA=</Value>
+                    <PlainText>false</PlainText>
+                </AdministratorPassword>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Password>
+                            <Value>UABhAHMAcwB3AG8AcgBkADEAMgAzACEA</Value>
+                            <PlainText>false</PlainText>
+                        </Password>
+                        <Group>Administrators</Group>
+                        <DisplayName>Server Admin</DisplayName>
+                        <Name>ServerAdmin</Name>
+                        <Description>Server Administrator Account</Description>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+
+            <!-- 自動ログオン -->
+            <AutoLogon>
+                <Password>
+                    <Value>UABhAHMAcwB3AG8AcgBkADEAMgAzACEA</Value>
+                    <PlainText>false</PlainText>
+                </Password>
+                <Enabled>true</Enabled>
+                <LogonCount>3</LogonCount>
+                <Username>ServerAdmin</Username>
+            </AutoLogon>
+
+            <!-- 初回ログオン時実行コマンド -->
+            <FirstLogonCommands>
+                <SynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <CommandLine>powershell.exe -ExecutionPolicy Bypass -File C:\Scripts\Initial-Setup.ps1</CommandLine>
+                    <Description>Initial Server Setup</Description>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <CommandLine>sconfig.exe</CommandLine>
+                    <Description>Server Configuration</Description>
+                </SynchronousCommand>
+            </FirstLogonCommands>
+        </component>
+    </settings>
+</unattend>
+```
+
+## Server 2022 特有の設定
+
+### 1. Server Core vs Desktop Experience
+
+**Server Core用の設定**
+```xml
+<component name="Microsoft-Windows-Shell-Setup">
+    <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>1</ProtectYourPC>
+    </OOBE>
+    <!-- Server Core では GUI 関連設定を最小化 -->
+</component>
+```
+
+**Desktop Experience用の設定**
+```xml
+<component name="Microsoft-Windows-Shell-Setup">
+    <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>1</ProtectYourPC>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+    </OOBE>
+    <ShowWindowsLive>false</ShowWindowsLive>
+</component>
+```
+
+### 2. Azure Edition特有の設定
+
+```xml
+<!-- Azure Edition用の設定 -->
+<component name="Microsoft-Windows-Shell-Setup">
+    <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+            <Order>1</Order>
+            <CommandLine>powershell.exe -Command "Install-Module -Name Az -Force -AllowClobber"</CommandLine>
+            <Description>Install Azure PowerShell Module</Description>
+        </SynchronousCommand>
+    </FirstLogonCommands>
+</component>
+```
+
+## 役割と機能の自動インストール
+
+### PowerShellスクリプトによる役割インストール
+
+**Initial-Setup.ps1**
+```powershell
+# Windows Server 2022 初期設定スクリプト
+param(
+    [string[]]$Roles = @(),
+    [string[]]$Features = @(),
+    [switch]$InstallHyperV,
+    [switch]$InstallAD,
+    [switch]$InstallDHCP,
+    [switch]$InstallDNS,
+    [switch]$InstallIIS
+)
+
+# ログ設定
+$LogPath = "C:\Scripts\Setup.log"
+$ErrorActionPreference = "Continue"
+
+function Write-LogMessage {
+    param([string]$Message, [string]$Level = "INFO")
+    $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogMessage = "[$TimeStamp] [$Level] $Message"
+    Write-Host $LogMessage
+    Add-Content -Path $LogPath -Value $LogMessage
+}
+
+Write-LogMessage "Starting Windows Server 2022 Initial Setup"
+
+# Windows Updateの設定
+Write-LogMessage "Configuring Windows Update"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" -Name "AUOptions" -Value 3
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" -Name "ScheduledInstallDay" -Value 0
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" -Name "ScheduledInstallTime" -Value 3
+
+# PowerShell実行ポリシーの設定
+Write-LogMessage "Setting PowerShell Execution Policy"
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Force
+
+# Windows Server Manager の自動起動無効化
+Write-LogMessage "Disabling Server Manager auto-start"
+New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Name "DoNotOpenServerManagerAtLogon" -Value 1 -PropertyType DWORD -Force
+
+# IE Enhanced Security Configuration の無効化
+Write-LogMessage "Disabling IE Enhanced Security Configuration"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}" -Name "IsInstalled" -Value 0
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}" -Name "IsInstalled" -Value 0
+
+# ファイアウォール設定
+Write-LogMessage "Configuring Windows Firewall"
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)"
+
+# リモート管理の有効化
+Write-LogMessage "Enabling Remote Management"
+Enable-PSRemoting -Force
+Set-WSManQuickConfig -Force
+
+# Hyper-V役割のインストール
+if ($InstallHyperV) {
+    Write-LogMessage "Installing Hyper-V Role"
+    Install-WindowsFeature -Name Hyper-V -IncludeManagementTools -Restart
+}
+
+# Active Directory役割のインストール
+if ($InstallAD) {
+    Write-LogMessage "Installing Active Directory Role"
+    Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+    
+    # ADDSの森とドメインの作成（例）
+    $DomainName = "contoso.local"
+    $SafeModePassword = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
+    
+    Install-ADDSForest `
+        -DomainName $DomainName `
+        -SafeModeAdministratorPassword $SafeModePassword `
+        -InstallDns `
+        -Force
+}
+
+# DHCP役割のインストール
+if ($InstallDHCP) {
+    Write-LogMessage "Installing DHCP Role"
+    Install-WindowsFeature -Name DHCP -IncludeManagementTools
+    
+    # DHCP基本設定
+    Add-DhcpServerv4Scope -Name "LAN" -StartRange 192.168.1.100 -EndRange 192.168.1.200 -SubnetMask 255.255.255.0
+    Set-DhcpServerv4OptionValue -OptionId 6 -Value "192.168.1.1"
+    Set-DhcpServerv4OptionValue -OptionId 3 -Value "192.168.1.1"
+}
+
+# DNS役割のインストール
+if ($InstallDNS) {
+    Write-LogMessage "Installing DNS Role"
+    Install-WindowsFeature -Name DNS -IncludeManagementTools
+}
+
+# IIS役割のインストール
+if ($InstallIIS) {
+    Write-LogMessage "Installing IIS Role"
+    Install-WindowsFeature -Name IIS-WebServerRole -IncludeManagementTools
+    Install-WindowsFeature -Name IIS-WebServer, IIS-CommonHttpFeatures, IIS-HttpErrors, IIS-HttpRedirect, IIS-ApplicationDevelopment, IIS-NetFxExtensibility45, IIS-HealthAndDiagnostics, IIS-HttpLogging, IIS-Security, IIS-RequestFiltering, IIS-Performance, IIS-WebServerManagementTools, IIS-ManagementConsole, IIS-IIS6ManagementCompatibility, IIS-Metabase
+}
+
+# カスタム役割とフィーチャーのインストール
+if ($Roles.Count -gt 0) {
+    Write-LogMessage "Installing custom roles: $($Roles -join ', ')"
+    Install-WindowsFeature -Name $Roles -IncludeManagementTools
+}
+
+if ($Features.Count -gt 0) {
+    Write-LogMessage "Installing custom features: $($Features -join ', ')"
+    Install-WindowsFeature -Name $Features -IncludeManagementTools
+}
+
+# システム情報の取得
+Write-LogMessage "System Information:"
+$OS = Get-WmiObject -Class Win32_OperatingSystem
+Write-LogMessage "OS: $($OS.Caption) $($OS.Version)"
+Write-LogMessage "Computer Name: $($env:COMPUTERNAME)"
+Write-LogMessage "Domain: $((Get-WmiObject -Class Win32_ComputerSystem).Domain)"
+
+# 必要に応じて再起動
+$PendingReboot = Get-ChildItem "HKLM:\Software\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" -ErrorAction SilentlyContinue
+if ($PendingReboot) {
+    Write-LogMessage "Restart required. Rebooting in 60 seconds..."
+    Start-Sleep 60
+    Restart-Computer -Force
+} else {
+    Write-LogMessage "Setup completed successfully. No restart required."
+}
+```
+
+## セキュリティ設定の自動化
+
+### セキュリティ強化スクリプト
+
+**Security-Hardening.ps1**
+```powershell
+# Windows Server 2022 セキュリティ強化スクリプト
+
+function Set-SecurityHardening {
+    param(
+        [switch]$ApplySTIG,
+        [switch]$EnableAdvancedAudit,
+        [switch]$ConfigureFirewall
+    )
+
+    Write-Host "Applying security hardening configuration..." -ForegroundColor Green
+
+    # パスワードポリシーの設定
+    net accounts /minpwlen:12 /maxpwage:90 /minpwage:1 /uniquepw:12 /lockoutthreshold:5
+
+    # アカウントロックアウトポリシー
+    net accounts /lockoutduration:30 /lockoutwindow:30
+
+    # 監査ポリシーの設定
+    if ($EnableAdvancedAudit) {
+        auditpol /set /category:"Account Logon" /success:enable /failure:enable
+        auditpol /set /category:"Account Management" /success:enable /failure:enable
+        auditpol /set /category:"Detailed Tracking" /success:enable /failure:enable
+        auditpol /set /category:"DS Access" /success:enable /failure:enable
+        auditpol /set /category:"Logon/Logoff" /success:enable /failure:enable
+        auditpol /set /category:"Object Access" /success:enable /failure:enable
+        auditpol /set /category:"Policy Change" /success:enable /failure:enable
+        auditpol /set /category:"Privilege Use" /success:enable /failure:enable
+        auditpol /set /category:"System" /success:enable /failure:enable
+    }
+
+    # Windows Defenderの設定
+    Set-MpPreference -DisableRealtimeMonitoring $false
+    Set-MpPreference -DisableBehaviorMonitoring $false
+    Set-MpPreference -DisableBlockAtFirstSeen $false
+    Set-MpPreference -DisableIOAVProtection $false
+    Set-MpPreference -DisableScriptScanning $false
+
+    # 不要なサービスの停止
+    $ServicesToDisable = @(
+        "Fax",
+        "RemoteRegistry", 
+        "SharedAccess",
+        "SSDPSRV",
+        "upnphost",
+        "WMPNetworkSvc"
+    )
+
+    foreach ($Service in $ServicesToDisable) {
+        Get-Service -Name $Service -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
+        Write-Host "Disabled service: $Service" -ForegroundColor Yellow
+    }
+
+    # レジストリ設定によるセキュリティ強化
+    $SecuritySettings = @{
+        # SMB1の無効化
+        "HKLM:\SYSTEM\CurrentControlSet\Services\lanmanserver\parameters" = @{
+            "SMB1" = 0
+        }
+        # NTLMv1の無効化
+        "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" = @{
+            "LmCompatibilityLevel" = 5
+        }
+        # 管理共有の無効化
+        "HKLM:\SYSTEM\CurrentControlSet\Services\lanmanserver\parameters" = @{
+            "AutoShareWks" = 0
+            "AutoShareServer" = 0
+        }
+        # UAC設定
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" = @{
+            "EnableLUA" = 1
+            "ConsentPromptBehaviorAdmin" = 2
+            "ConsentPromptBehaviorUser" = 3
+            "EnableInstallerDetection" = 1
+        }
+    }
+
+    foreach ($RegPath in $SecuritySettings.Keys) {
+        if (!(Test-Path $RegPath)) {
+            New-Item -Path $RegPath -Force | Out-Null
+        }
+        foreach ($Setting in $SecuritySettings[$RegPath].GetEnumerator()) {
+            Set-ItemProperty -Path $RegPath -Name $Setting.Key -Value $Setting.Value
+            Write-Host "Set registry: $RegPath\$($Setting.Key) = $($Setting.Value)" -ForegroundColor Green
+        }
+    }
+
+    # ファイアウォール設定
+    if ($ConfigureFirewall) {
+        # デフォルトでブロック
+        Set-NetFirewallProfile -All -DefaultInboundAction Block -DefaultOutboundAction Allow
+        
+        # 必要な接続を許可
+        New-NetFirewallRule -DisplayName "Allow RDP" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
+        New-NetFirewallRule -DisplayName "Allow WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow
+        New-NetFirewallRule -DisplayName "Allow WinRM HTTPS" -Direction Inbound -Protocol TCP -LocalPort 5986 -Action Allow
+        New-NetFirewallRule -DisplayName "Allow SMB" -Direction Inbound -Protocol TCP -LocalPort 445 -Action Allow
+        New-NetFirewallRule -DisplayName "Allow ICMP" -Direction Inbound -Protocol ICMPv4 -Action Allow
+    }
+
+    Write-Host "Security hardening completed!" -ForegroundColor Green
+}
+
+# 実行
+Set-SecurityHardening -EnableAdvancedAudit -ConfigureFirewall
+```
+
+## PowerShell スクリプトの統合
+
+### unattend.xmlへのスクリプト組み込み
+
+```xml
+<!-- FirstLogonCommands でのスクリプト実行 -->
+<FirstLogonCommands>
+    <!-- PowerShell実行ポリシーの設定 -->
+    <SynchronousCommand wcm:action="add">
+        <Order>1</Order>
+        <CommandLine>powershell.exe -Command "Set-ExecutionPolicy RemoteSigned -Force"</CommandLine>
+        <Description>Set PowerShell Execution Policy</Description>
+    </SynchronousCommand>
+    
+    <!-- 初期設定スクリプトの実行 -->
+    <SynchronousCommand wcm:action="add">
+        <Order>2</Order>
+        <CommandLine>powershell.exe -ExecutionPolicy Bypass -File C:\Scripts\Initial-Setup.ps1 -InstallIIS -InstallDNS</CommandLine>
+        <Description>Execute Initial Setup Script</Description>
+    </SynchronousCommand>
+    
+    <!-- セキュリティ強化スクリプトの実行 -->
+    <SynchronousCommand wcm:action="add">
+        <Order>3</Order>
+        <CommandLine>powershell.exe -ExecutionPolicy Bypass -File C:\Scripts\Security-Hardening.ps1</CommandLine>
+        <Description>Apply Security Hardening</Description>
+    </SynchronousCommand>
+    
+    <!-- Windows Update の実行 -->
+    <SynchronousCommand wcm:action="add">
+        <Order>4</Order>
+        <CommandLine>powershell.exe -Command "Install-Module PSWindowsUpdate -Force; Get-WUInstall -AcceptAll -AutoReboot"</CommandLine>
+        <Description>Install Windows Updates</Description>
+    </SynchronousCommand>
+    
+    <!-- ドメイン参加（オプション） -->
+    <SynchronousCommand wcm:action="add">
+        <Order>5</Order>
+        <CommandLine>powershell.exe -ExecutionPolicy Bypass -File C:\Scripts\Domain-Join.ps1</CommandLine>
+        <Description>Join Domain</Description>
+    </SynchronousCommand>
+</FirstLogonCommands>
+```
+
+### ドメイン参加自動化スクリプト
+
+**Domain-Join.ps1**
+```powershell
+# ドメイン参加自動化スクリプト
+param(
+    [string]$DomainName = "contoso.local",
+    [string]$OUPath = "OU=Servers,DC=contoso,DC=local",
+    [string]$AdminUser = "administrator",
+    [string]$AdminPassword = "P@ssw0rd123!"
+)
+
+$LogPath = "C:\Scripts\Domain-Join.log"
+
+function Write-LogMessage {
+    param([string]$Message, [string]$Level = "INFO")
+    $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogMessage = "[$TimeStamp] [$Level] $Message"
+    Write-Host $LogMessage
+    Add-Content -Path $LogPath -Value $LogMessage
+}
+
+try {
+    Write-LogMessage "Starting domain join process for domain: $DomainName"
+    
+    # 資格情報の作成
+    $SecurePassword = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+    $Credential = New-Object System.Management.Automation.PSCredential("$DomainName\$AdminUser", $SecurePassword)
+    
+    # DNS設定の確認
+    $CurrentDNS = (Get-DnsClientServerAddress -InterfaceAlias "Ethernet" -AddressFamily IPv4).ServerAddresses
+    Write-LogMessage "Current DNS servers: $($CurrentDNS -join ', ')"
+    
+    # ドメインコントローラーのDNSに設定（必要に応じて）
+    # Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses "192.168.1.10"
+    
+    # ドメイン参加の実行
+    if ($OUPath) {
+        Add-Computer -DomainName $DomainName -Credential $Credential -OUPath $OUPath -Force
+        Write-LogMessage "Successfully joined domain $DomainName with OU: $OUPath"
+    } else {
+        Add-Computer -DomainName $DomainName -Credential $Credential -Force
+        Write-LogMessage "Successfully joined domain $DomainName"
+    }
+    
+    # 再起動の予約
+    Write-LogMessage "Domain join completed. Rebooting in 60 seconds..."
+    Start-Sleep 60
+    Restart-Computer -Force
+    
+} catch {
+    Write-LogMessage "Error during domain join: $($_.Exception.Message)" "ERROR"
+    Write-LogMessage "Stack Trace: $($_.ScriptStackTrace)" "ERROR"
+}
+```
+
+## インストールメディアの準備
+
+### 1. カスタムISOの作成
+
+```powershell
+# カスタムWindows Server 2022 ISOの作成スクリプト
+param(
+    [string]$SourceISO = "C:\ISO\WindowsServer2022.iso",
+    [string]$WorkingDir = "C:\Temp\WS2022-Custom",
+    [string]$OutputISO = "C:\ISO\WS2022-Unattended.iso",
+    [string]$UnattendXML = "C:\Scripts\unattend.xml"
+)
+
+# 作業ディレクトリの準備
+if (Test-Path $WorkingDir) {
+    Remove-Item $WorkingDir -Recurse -Force
+}
+New-Item -Path $WorkingDir -ItemType Directory -Force
+
+# ISOのマウント
+$MountResult = Mount-DiskImage -ImagePath $SourceISO -PassThru
+$DriveLetter = ($MountResult | Get-Volume).DriveLetter
+
+Write-Host "Mounted ISO at drive: ${DriveLetter}:" -ForegroundColor Green
+
+# ファイルの複製
+Write-Host "Copying ISO contents..." -ForegroundColor Yellow
+robocopy "${DriveLetter}:\" "$WorkingDir" /E /COPYALL /R:1 /W:1
+
+# ISOのアンマウント
+Dismount-DiskImage -ImagePath $SourceISO
+
+# unattend.xmlの配置
+Copy-Item $UnattendXML "$WorkingDir\unattend.xml"
+
+# スクリプトディレクトリの作成
+$ScriptsDir = "$WorkingDir\Scripts"
+New-Item -Path $ScriptsDir -ItemType Directory -Force
+
+# PowerShellスクリプトの配置
+Copy-Item "C:\Scripts\Initial-Setup.ps1" "$ScriptsDir\"
+Copy-Item "C:\Scripts\Security-Hardening.ps1" "$ScriptsDir\"
+Copy-Item "C:\Scripts\Domain-Join.ps1" "$ScriptsDir\"
+
+# Autounattend.xmlの作成（自動実行用）
+Copy-Item "$WorkingDir\unattend.xml" "$WorkingDir\Autounattend.xml"
+
+# カスタムブートイメージの作成（必要に応じて）
+$BootWim = "$WorkingDir\sources\boot.wim"
+$MountPoint = "C:\Temp\BootMount"
+
+New-Item -Path $MountPoint -ItemType Directory -Force
+Mount-WindowsImage -ImagePath $BootWim -Index 1 -Path $MountPoint
+
+# 追加のドライバーやツールを組み込み（例）
+# Add-WindowsDriver -Path $MountPoint -Driver "C:\Drivers" -Recurse
+
+# パッケージの追加（例：.NET Framework）
+# Add-WindowsPackage -Path $MountPoint -PackagePath "C:\Packages\package.cab"
+
+Dismount-WindowsImage -Path $MountPoint -Save
+Remove-Item $MountPoint -Recurse -Force
+
+# 新しいISOの作成
+$ISOCreationTool = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
+
+if (Test-Path $ISOCreationTool) {
+    Write-Host "Creating custom ISO..." -ForegroundColor Yellow
+    $OSCDIMGArgs = @(
+        "-m",
+        "-o",
+        "-u2",
+        "-udfver102",
+        "-bootdata:2#p0,e,b`"$WorkingDir\boot\etfsboot.com`"#pEF,e,b`"$WorkingDir\efi\microsoft\boot\efisys.bin`"",
+        $WorkingDir,
+        $OutputISO
+    )
+    
+    & $ISOCreationTool $OSCDIMGArgs
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Custom ISO created successfully: $OutputISO" -ForegroundColor Green
+    } else {
+        Write-Error "Failed to create ISO. Exit code: $LASTEXITCODE"
+    }
+} else {
+    Write-Warning "OSCDIMG tool not found. Please install Windows ADK."
+}
+
+# 作業ディレクトリのクリーンアップ
+Remove-Item $WorkingDir -Recurse -Force
+```
+
+### 2. 仮想マシンでのテスト自動化
+
+```powershell
+# 自動テスト実行スクリプト
+param(
+    [string]$ISOPath = "C:\ISO\WS2022-Unattended.iso",
+    [string]$VMName = "WS2022-Test-$(Get-Date -Format 'yyyyMMdd-HHmmss')",
+    [int]$TimeoutMinutes = 60
+)
+
+try {
+    Write-Host "Creating test VM: $VMName" -ForegroundColor Green
+    
+    # テスト用VMの作成
+    $VMPath = "C:\VMs\Test"
+    $VHDPath = "$VMPath\$VMName\$VMName.vhdx"
+    
+    New-VM -Name $VMName -Path $VMPath -Generation 2 -MemoryStartupBytes 4GB -NewVHDPath $VHDPath -NewVHDSizeBytes 127GB
+    Set-VMProcessor -VMName $VMName -Count 2
+    Set-VMFirmware -VMName $VMName -EnableSecureBoot On -SecureBootTemplate MicrosoftWindows
+    Set-VMDvdDrive -VMName $VMName -Path $ISOPath
+    
+    # ネットワーク設定
+    Connect-VMNetworkAdapter -VMName $VMName -SwitchName "Internal"
+    
+    # VMの起動
+    Write-Host "Starting VM and beginning unattended installation..." -ForegroundColor Yellow
+    Start-VM -Name $VMName
+    
+    # インストール完了の監視
+    $StartTime = Get-Date
+    $InstallComplete = $false
+    
+    while (((Get-Date) - $StartTime).TotalMinutes -lt $TimeoutMinutes -and -not $InstallComplete) {
+        Start-Sleep 30
+        
+        $VMState = (Get-VM -Name $VMName).State
+        Write-Host "VM State: $VMState" -ForegroundColor Cyan
+        
+        if ($VMState -eq "Running") {
+            # WinRM接続の確認
+            try {
+                $Session = New-PSSession -VMName $VMName -Credential (Get-Credential -Message "Enter VM credentials")
+                if ($Session) {
+                    Write-Host "Successfully connected via PowerShell Direct!" -ForegroundColor Green
+                    
+                    # インストール状況の確認
+                    $InstallStatus = Invoke-Command -Session $Session -ScriptBlock {
+                        $LogPath = "C:\Scripts\Setup.log"
+                        if (Test-Path $LogPath) {
+                            Get-Content $LogPath -Tail 5
+                        } else {
+                            "Setup log not found"
+                        }
+                    }
+                    
+                    Write-Host "Install Status: $InstallStatus" -ForegroundColor Cyan
+                    
+                    # インストール完了の確認
+                    $SetupComplete = Invoke-Command -Session $Session -ScriptBlock {
+                        Test-Path "C:\Scripts\Setup-Complete.flag"
+                    }
+                    
+                    if ($SetupComplete) {
+                        $InstallComplete = $true
+                        Write-Host "Installation completed successfully!" -ForegroundColor Green
+                    }
+                    
+                    Remove-PSSession $Session
+                }
+            } catch {
+                Write-Host "Waiting for VM to be ready..." -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    if (-not $InstallComplete) {
+        Write-Warning "Installation timed out after $TimeoutMinutes minutes"
+    }
+    
+    # テスト結果の取得
+    $TestSession = New-PSSession -VMName $VMName -Credential (Get-Credential -Message "Enter VM credentials")
+    if ($TestSession) {
+        $TestResults = Invoke-Command -Session $TestSession -ScriptBlock {
+            @{
+                ComputerName = $env:COMPUTERNAME
+                OSVersion = (Get-WmiObject Win32_OperatingSystem).Caption
+                Domain = (Get-WmiObject Win32_ComputerSystem).Domain
+                InstalledFeatures = (Get-WindowsFeature | Where-Object InstallState -eq "Installed").Name
+                LastBootTime = (Get-WmiObject Win32_OperatingSystem).LastBootUpTime
+            }
+        }
+        
+        Write-Host "Test Results:" -ForegroundColor Green
+        $TestResults | Format-List
+        
+        Remove-PSSession $TestSession
+    }
+    
+} catch {
+    Write-Error "Test execution failed: $($_.Exception.Message)"
+} finally {
+    # クリーンアップ（オプション）
+    $Cleanup = Read-Host "Delete test VM? (y/N)"
+    if ($Cleanup -eq "y" -or $Cleanup -eq "Y") {
+        Stop-VM -Name $VMName -Force -ErrorAction SilentlyContinue
+        Remove-VM -Name $VMName -Force
+        Write-Host "Test VM deleted" -ForegroundColor Yellow
+    }
+}
+```
+
+## トラブルシューティング
+
+### 1. 一般的な問題と解決策
+
+**セキュアブート関連の問題**
+```xml
+<!-- setupact.logでのエラー確認 -->
+<RunSynchronousCommand wcm:action="add">
+    <Order>1</Order>
+    <Path>reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+</RunSynchronousCommand>
+```
+
+**UEFI vs BIOS問題**
+```xml
+<!-- Gen2では必ずUEFI用のパーティション構成を使用 -->
+<CreatePartition wcm:action="add">
+    <Order>1</Order>
+    <Type>EFI</Type>
+    <Size>260</Size>
+</CreatePartition>
+```
+
+**ネットワーク設定の問題**
+```powershell
+# トラブルシューティング用スクリプト
+function Test-NetworkConfiguration {
+    Write-Host "=== Network Configuration Diagnosis ===" -ForegroundColor Yellow
+    
+    # ネットワークアダプターの確認
+    Get-NetAdapter | Format-Table Name, InterfaceDescription, Status, LinkSpeed
+    
+    # IP設定の確認
+    Get-NetIPConfiguration | Format-Table InterfaceAlias, IPv4Address, IPv4DefaultGateway, DNSServer
+    
+    # 接続テスト
+    Test-NetConnection -ComputerName 8.8.8.8 -Port 53
+    Test-NetConnection -ComputerName google.com
+    
+    # DNS解決テスト
+    Resolve-DnsName google.com
+}
+```
+
+### 2. ログとデバッグ
+
+**詳細ログ設定**
+```xml
+<!-- setupact.logとsetuperr.logの詳細化 -->
+<RunSynchronousCommand wcm:action="add">
+    <Order>1</Order>
+    <Path>reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State /v ImageState /t REG_SZ /d "IMAGE_STATE_UNDEPLOYABLE" /f</Path>
+</RunSynchronousCommand>
+```
+
+**カスタムログ関数**
+```powershell
+function Write-DetailedLog {
+    param(
+        [string]$Message,
+        [string]$LogPath = "C:\Scripts\Detailed-Setup.log",
+        [string]$Level = "INFO"
+    )
+    
+    $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $ProcessId = $PID
+    $ThreadId = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+    $LogEntry = "[$TimeStamp] [PID:$ProcessId] [TID:$ThreadId] [$Level] $Message"
+    
+    # コンソール出力
+    switch ($Level) {
+        "ERROR" { Write-Host $LogEntry -ForegroundColor Red }
+        "WARN"  { Write-Host $LogEntry -ForegroundColor Yellow }
+        "INFO"  { Write-Host $LogEntry -ForegroundColor Green }
+        default { Write-Host $LogEntry }
+    }
+    
+    # ファイル出力
+    Add-Content -Path $LogPath -Value $LogEntry
+    
+    # イベントログ出力
+    try {
+        if (-not [System.Diagnostics.EventLog]::SourceExists("CustomSetup")) {
+            New-EventLog -LogName Application -Source "CustomSetup"
+        }
+        
+        $EventType = switch ($Level) {
+            "ERROR" { "Error" }
+            "WARN"  { "Warning" }
+            default { "Information" }
+        }
+        
+        Write-EventLog -LogName Application -Source "CustomSetup" -EventId 1001 -EntryType $EventType -Message $Message
+    } catch {
+        # イベントログ書き込み失敗は無視
+    }
+}
+```
+
+### 3. 検証とテスト
+
+**自動検証スクリプト**
+```powershell
+function Test-ServerConfiguration {
+    param([string]$ConfigFile = "C:\Scripts\expected-config.json")
+    
+    $TestResults = @()
+    
+    # 期待する設定の読み込み
+    if (Test-Path $ConfigFile) {
+        $ExpectedConfig = Get-Content $ConfigFile | ConvertFrom-Json
+    } else {
+        Write-Warning "Configuration file not found: $ConfigFile"
+        return
+    }
+    
+    # OS バージョン確認
+    $OSVersion = (Get-WmiObject Win32_OperatingSystem).Caption
+    $TestResults += @{
+        Test = "OS Version"
+        Expected = $ExpectedConfig.OSVersion
+        Actual = $OSVersion
+        Result = if ($OSVersion -like "*$($ExpectedConfig.OSVersion)*") { "PASS" } else { "FAIL" }
+    }
+    
+    # ドメイン参加確認
+    $Domain = (Get-WmiObject Win32_ComputerSystem).Domain
+    $TestResults += @{
+        Test = "Domain Membership"
+        Expected = $ExpectedConfig.Domain
+        Actual = $Domain
+        Result = if ($Domain -eq $ExpectedConfig.Domain) { "PASS" } else { "FAIL" }
+    }
+    
+    # インストールされた役割の確認
+    $InstalledRoles = (Get-WindowsFeature | Where-Object InstallState -eq "Installed").Name
+    foreach ($Role in $ExpectedConfig.RequiredRoles) {
+        $TestResults += @{
+            Test = "Role: $Role"
+            Expected = "Installed"
+            Actual = if ($InstalledRoles -contains $Role) { "Installed" } else { "Not Installed" }
+            Result = if ($InstalledRoles -contains $Role) { "PASS" } else { "FAIL" }
+        }
+    }
+    
+    # ネットワーク設定確認
+    $IPConfig = Get-NetIPConfiguration | Where-Object InterfaceAlias -eq "Ethernet"
+    if ($IPConfig -and $ExpectedConfig.IPAddress) {
+        $TestResults += @{
+            Test = "IP Address"
+            Expected = $ExpectedConfig.IPAddress
+            Actual = $IPConfig.IPv4Address.IPAddress
+            Result = if ($IPConfig.IPv4Address.IPAddress -eq $ExpectedConfig.IPAddress) { "PASS" } else { "FAIL" }
+        }
+    }
+    
+    # セキュリティ設定確認
+    $UAC = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name EnableLUA
+    $TestResults += @{
+        Test = "UAC Enabled"
+        Expected = "1"
+        Actual = $UAC.EnableLUA
+        Result = if ($UAC.EnableLUA -eq 1) { "PASS" } else { "FAIL" }
+    }
+    
+    # 結果の表示
+    Write-Host "`n=== Configuration Test Results ===" -ForegroundColor Cyan
+    $TestResults | Format-Table Test, Expected, Actual, Result -AutoSize
+    
+    # サマリー
+    $PassCount = ($TestResults | Where-Object Result -eq "PASS").Count
+    $TotalCount = $TestResults.Count
+    Write-Host "`nTest Summary: $PassCount/$TotalCount tests passed" -ForegroundColor $(if ($PassCount -eq $TotalCount) { "Green" } else { "Red" })
+    
+    return $TestResults
+}
+
+# 期待する設定ファイルの例 (expected-config.json)
+@{
+    OSVersion = "Windows Server 2022"
+    Domain = "contoso.local"
+    RequiredRoles = @("DNS", "IIS-WebServerRole", "AD-Domain-Services")
+    IPAddress = "192.168.1.10"
+} | ConvertTo-Json | Set-Content "C:\Scripts\expected-config.json"
+```
+
+### 4. 完全自動化の実行例
+
+**マスター実行スクリプト**
+```powershell
+# Windows Server 2022 完全自動展開スクリプト
+param(
+    [string]$VMName = "WS2022-Production",
+    [string]$ISOPath = "C:\ISO\WS2022-Unattended.iso",
+    [int]$MemoryGB = 8,
+    [int]$VHDSizeGB = 200,
+    [string]$NetworkSwitch = "Production",
+    [switch]$WaitForCompletion,
+    [switch]$RunTests
+)
+
+# 展開プロセスの開始
+Write-Host "Starting Windows Server 2022 automated deployment..." -ForegroundColor Green
+
+# 1. 仮想マシンの作成
+& "C:\Scripts\Create-HyperVVM.ps1" -VMName $VMName -ISOPath $ISOPath -MemoryGB $MemoryGB -VHDSizeGB $VHDSizeGB -NetworkSwitch $NetworkSwitch
+
+# 2. 無人インストールの監視
+if ($WaitForCompletion) {
+    & "C:\Scripts\Monitor-Installation.ps1" -VMName $VMName -TimeoutMinutes 90
+}
+
+# 3. 配備後テストの実行
+if ($RunTests) {
+    & "C:\Scripts\Test-Deployment.ps1" -VMName $VMName
+}
+
+Write-Host "Deployment process completed!" -ForegroundColor Green
+```
+
+この完全ガイドにより、Windows Server 2022のHyper-V Gen2環境での無人インストールが効率的に実現できます。各スクリプトは実際の環境に合わせてカスタマイズしてご利用ください。
